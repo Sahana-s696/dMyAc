@@ -34,7 +34,6 @@ const operationFromState = (state: unknown): Operation | null => {
   const operation = state.operation
   return operation === 'deposit' || operation === 'withdrawal' || operation === 'transfer' ? operation : null
 }
-const typeLabel = (type: string) => type === 'income' ? 'Deposit' : type === 'expense' ? 'Withdrawal' : type === 'transfer' ? 'Transfer' : type.replaceAll('_', ' ')
 const messageForError = (error: unknown) => error instanceof Error ? error.message : 'Unable to complete this request.'
 
 function runningBalances(data: FinanceData) {

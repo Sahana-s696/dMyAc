@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { CalendarDays, Printer, Calculator } from 'lucide-react'
+import { CalendarDays, Printer } from 'lucide-react'
 import { useAuth } from '../context/AuthContext'
 import { getTransactionMovement, groupTransactionEntries, loadFinanceData, type FinanceData, type TransactionRecord } from '../lib/financeData'
 
@@ -11,6 +11,7 @@ const monthEnd = (month: string) => `${month}-${String(new Date(Number(month.sli
 export const MonthlySummaryPage = () => {
   const { user } = useAuth()
   const [month, setMonth] = useState('2026-05')
+  const title = new Intl.DateTimeFormat('en-IN', { month: 'long', year: 'numeric' }).format(new Date(`${month}-01`))
   const [data, setData] = useState<FinanceData | null>(null)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)

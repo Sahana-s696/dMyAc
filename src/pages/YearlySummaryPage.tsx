@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Calculator } from 'lucide-react'
 import { useAuth } from '../context/AuthContext'
 import { getTransactionMovement, loadFinanceData, type FinanceData } from '../lib/financeData'
 
