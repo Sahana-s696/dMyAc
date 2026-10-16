@@ -1,11 +1,32 @@
 import { useMemo, useState, type ChangeEvent } from 'react'
-import { AlertCircle, CheckCircle2, FileSpreadsheet, UploadCloud } from 'lucide-react'
+import { AlertCircle, CheckCircle2, FileSpreadsheet, UploadCloud, HelpCircle } from 'lucide-react'
 import * as XLSX from 'xlsx'
 import { useAuth } from '../context/AuthContext'
 import { createTransaction, importFinanceBackup, loadFinanceData, type FinanceBackup, type FinanceData } from '../lib/financeData'
 
-type Mapping = { date: string; description: string; amount: string; type: string; category: string; reference: string }
+type Mapping = { date: string; description: string; amount: string; deposit: string; withdrawal: string; type: string; category: string; reference: string }
 type PreviewRow = { line: number; values: unknown[]; valid: boolean; reason: string; transaction?: { transaction_date: string; description: string; amount: number; transaction_type: 'income' | 'expense'; category_id: string | null; reference_number: string | null } }
+
+const nextDate = (date: string) => {
+  const next = new Date(`${date}T00:00:00Z`)
+  next.setUTCDate(next.getUTCDate() + 1)
+  return next.toISOString().slice(0, 10)
+}
+const statementTransactionKey = (transaction: {
+  account_id: string
+  transaction_date: string
+  description: string
+  amount: number
+  transaction_type: string
+  reference_number: string | null
+}) => [
+  transaction.account_id,
+  transaction.transaction_date,
+  transaction.transaction_type,
+  transaction.amount,
+  transaction.reference_number?.trim().toLowerCase() ?? '',
+  transaction.description.trim().toLowerCase(),
+].join('|')
 
 const mapHeader = (headers: string[], aliases: string[]) => headers.find((header) => aliases.some((alias) => header.toLowerCase().includes(alias))) ?? ''
 const normalizeDate = (value: unknown): string | null => {
@@ -47,6 +68,20 @@ const errorText = (error: unknown) => error instanceof Error ? error.message : '
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value)
 const nullableCsvText = (value: unknown) => value === null || value === undefined || value === '' ? null : String(value)
 const csvNumber = (value: unknown) => parseMoney(value)
+
+const getAliasesForKey = (key: string): string[] => {
+  const aliases: Record<string, string[]> = {
+    date: ['date', 'time', 'tran', 'value date', 'posting date'],
+    description: ['description', 'details', 'narration', 'particular', 'memo', 'remarks'],
+    amount: ['amount', 'value', 'amt', 'transaction amount'],
+    deposit: ['deposit', 'credit', 'deposits', 'credits', 'cr'],
+    withdrawal: ['withdrawal', 'debit', 'withdrawals', 'debits', 'dr'],
+    type: ['type', 'debit/credit', 'dr/cr', 'debit credit', 'transaction type', 'd/c'],
+    category: ['category', 'cat', 'category name', 'expense category'],
+    reference: ['reference', 'ref no', 'ref', 'cheque', 'cheque no', 'transaction id', 'txn id', 'utr'],
+  }
+  return aliases[key] ?? []
+}
 
 function backupRecordFromCsv(type: string, row: Record<string, unknown>) {
   if (type === 'account') {
@@ -174,13 +209,28 @@ export const ExcelImportPage = () => {
   const [headers, setHeaders] = useState<string[]>([])
   const [rows, setRows] = useState<unknown[][]>([])
   const [finance, setFinance] = useState<FinanceData | null>(null)
-  const [mapping, setMapping] = useState<Mapping>({ date: '', description: '', amount: '', type: '', category: '', reference: '' })
+  const [mapping, setMapping] = useState<Mapping>({ date: '', description: '', amount: '', deposit: '', withdrawal: '', type: '', category: '', reference: '' })
   const [accountId, setAccountId] = useState('')
+  const [importStartDate, setImportStartDate] = useState('')
+  const [importEndDate, setImportEndDate] = useState('')
   const [loading, setLoading] = useState(false)
   const [importing, setImporting] = useState(false)
   const [error, setError] = useState('')
   const [summary, setSummary] = useState('')
   const [backup, setBackup] = useState<FinanceBackup | null>(null)
+
+  const getSampleValues = (header: string, count: number): string[] => {
+    const colIndex = headers.indexOf(header)
+    if (colIndex === -1) return []
+    const samples: string[] = []
+    for (let i = 0; i < rows.length && samples.length < count; i++) {
+      const val = rows[i][colIndex]
+      if (val !== null && val !== undefined && String(val).trim() !== '') {
+        samples.push(String(val).trim())
+      }
+    }
+    return samples
+  }
 
   const loadFinance = async () => {
     if (!user) return
@@ -202,6 +252,8 @@ export const ExcelImportPage = () => {
     setRows([])
     setSheetNames([])
     setSheetName('')
+    setImportStartDate('')
+    setImportEndDate('')
     try {
       let workbook: XLSX.WorkBook
       if (file.name.toLowerCase().endsWith('.json')) {
@@ -281,7 +333,12 @@ export const ExcelImportPage = () => {
       setSheetName(firstSheet)
       const data = await loadFinanceData(user?.id ?? 'demo-user')
       setFinance(data)
-      setAccountId(data.accounts[0]?.id ?? '')
+      const firstAccount = data.accounts[0]
+      setAccountId(firstAccount?.id ?? '')
+      const latestDate = firstAccount && data.transactions
+        .filter((transaction) => transaction.account_id === firstAccount.id)
+        .reduce((latest, transaction) => transaction.transaction_date > latest ? transaction.transaction_date : latest, '')
+      setImportStartDate(latestDate ? nextDate(latestDate) : firstAccount?.opening_balance_date ?? '')
       loadSheet(workbook, firstSheet)
     } catch (fileError) {
       setError(errorText(fileError))
@@ -305,7 +362,11 @@ export const ExcelImportPage = () => {
     const hasAmount = nextHeaders.some((header) => ['amount', 'value'].some((alias) => header.toLowerCase().includes(alias)))
     const depositIndex = nextHeaders.findIndex((header) => header.toLowerCase().trim() === 'deposit')
     const withdrawalIndex = nextHeaders.findIndex((header) => header.toLowerCase().trim() === 'withdrawal')
-    if (!hasAmount && (depositIndex !== -1 || withdrawalIndex !== -1)) {
+    const creditIndex = nextHeaders.findIndex((header) => header.toLowerCase().trim() === 'credit')
+    const debitIndex = nextHeaders.findIndex((header) => header.toLowerCase().trim() === 'debit')
+    const hasSeparateDepositWithdrawal = !hasAmount && (depositIndex !== -1 || withdrawalIndex !== -1)
+    const hasSeparateCreditDebit = !hasAmount && (creditIndex !== -1 || debitIndex !== -1)
+    if (hasSeparateDepositWithdrawal) {
       const amountHeader = 'Import Amount'
       const typeHeader = 'Import Type'
       nextHeaders = [...nextHeaders, amountHeader, typeHeader]
@@ -316,6 +377,17 @@ export const ExcelImportPage = () => {
           const amount = row[isDepositRow ? depositIndex : withdrawalIndex]
           return [...row, amount, isDepositRow ? 'Deposit' : 'Withdrawal']
         })
+    } else if (hasSeparateCreditDebit) {
+      const amountHeader = 'Import Amount'
+      const typeHeader = 'Import Type'
+      nextHeaders = [...nextHeaders, amountHeader, typeHeader]
+      nextRows = nextRows
+        .filter((row) => String(row[creditIndex] ?? '').trim() !== '' || String(row[debitIndex] ?? '').trim() !== '')
+        .map((row) => {
+          const isDepositRow = String(row[creditIndex] ?? '').trim() !== ''
+          const amount = row[isDepositRow ? creditIndex : debitIndex]
+          return [...row, amount, isDepositRow ? 'Deposit' : 'Withdrawal']
+        })
     }
     setHeaders(nextHeaders)
     setRows(nextRows)
@@ -323,6 +395,8 @@ export const ExcelImportPage = () => {
       date: mapHeader(nextHeaders, ['date', 'time']),
       description: mapHeader(nextHeaders, ['description', 'details', 'narration', 'particular']),
       amount: mapHeader(nextHeaders, ['amount', 'value']),
+      deposit: mapHeader(nextHeaders, ['deposit', 'credit']),
+      withdrawal: mapHeader(nextHeaders, ['withdrawal', 'debit']),
       type: mapHeader(nextHeaders, ['type', 'debit/credit', 'transaction']),
       category: mapHeader(nextHeaders, ['category']),
       reference: mapHeader(nextHeaders, ['reference', 'ref no', 'cheque', 'transaction id']),
@@ -331,37 +405,81 @@ export const ExcelImportPage = () => {
 
   const parsedRows = useMemo<PreviewRow[]>(() => {
     const index = (name: string) => headers.indexOf(name)
+    const existingTransactions = new Set((finance?.transactions ?? [])
+      .map((transaction) => statementTransactionKey(transaction)))
+    const seenTransactions = new Set(existingTransactions)
     return rows.map((values, rowIndex) => {
+      if (importStartDate && importEndDate && importStartDate > importEndDate) {
+        return { line: rowIndex + 2, values, valid: false, reason: 'Import start date must be on or before the end date.' }
+      }
       const date = normalizeDate(values[index(mapping.date)])
       const description = String(values[index(mapping.description)] ?? '').trim()
-      const amount = parseMoney(values[index(mapping.amount)])
+      const hasSeparateDepositWithdrawal = mapping.deposit && mapping.withdrawal && mapping.deposit !== mapping.withdrawal
+      let amount: number | null = null
+      let transactionType: 'income' | 'expense' = 'income'
+      if (hasSeparateDepositWithdrawal) {
+        const depositVal = parseMoney(values[index(mapping.deposit)])
+        const withdrawalVal = parseMoney(values[index(mapping.withdrawal)])
+        if (depositVal !== null && depositVal > 0) {
+          amount = depositVal
+          transactionType = 'income'
+        } else if (withdrawalVal !== null && withdrawalVal > 0) {
+          amount = withdrawalVal
+          transactionType = 'expense'
+        } else {
+          amount = null
+        }
+      } else {
+        amount = parseMoney(values[index(mapping.amount)])
+        if (amount !== null) {
+          transactionType = parseType(values[index(mapping.type)], amount)
+        }
+      }
       if (!date) return { line: rowIndex + 2, values, valid: false, reason: 'Date is missing or invalid.' }
+      if (importStartDate && date < importStartDate || importEndDate && date > importEndDate) {
+        return { line: rowIndex + 2, values, valid: false, reason: 'Date is outside the selected import range.' }
+      }
       if (!description) return { line: rowIndex + 2, values, valid: false, reason: 'Description is missing.' }
       if (amount === null || amount === 0) return { line: rowIndex + 2, values, valid: false, reason: 'Amount must be a valid non-zero number.' }
       const categoryName = mapping.category ? String(values[index(mapping.category)] ?? '').trim().toLowerCase() : ''
       if (String(values[index(mapping.type)] ?? '').toLowerCase().includes('transfer')) {
         return { line: rowIndex + 2, values, valid: false, reason: 'Transfer rows must be entered using the transfer workflow.' }
       }
-      const category = categoryName ? finance?.categories.find((item) => item.name.toLowerCase() === categoryName && item.category_type === (parseType(values[index(mapping.type)], amount) === 'income' ? 'income' : 'expense')) : undefined
+      const category = categoryName ? finance?.categories.find((item) => item.name.toLowerCase() === categoryName && item.category_type === (transactionType === 'income' ? 'income' : 'expense')) : undefined
       if (categoryName && !category) return { line: rowIndex + 2, values, valid: false, reason: `Category "${categoryName}" was not found.` }
       const categoryId = category?.id ?? null
       const reference = mapping.reference ? String(values[index(mapping.reference)] ?? '').trim() : ''
+      const transaction = {
+        transaction_date: date,
+        description,
+        amount: Math.abs(amount),
+        transaction_type: transactionType,
+        category_id: categoryId,
+        reference_number: reference || null,
+      }
+      const key = statementTransactionKey({ ...transaction, account_id: accountId })
+      if (seenTransactions.has(key)) {
+        return { line: rowIndex + 2, values, valid: false, reason: 'Duplicate transaction already exists or appears earlier in this file.' }
+      }
+      seenTransactions.add(key)
       return {
         line: rowIndex + 2,
         values,
         valid: true,
         reason: '',
-        transaction: {
-          transaction_date: date,
-          description,
-          amount: Math.abs(amount),
-          transaction_type: parseType(values[index(mapping.type)], amount),
-          category_id: categoryId,
-          reference_number: reference || null,
-        },
+        transaction,
       }
     })
-  }, [finance, headers, mapping, rows])
+  }, [accountId, finance, headers, importEndDate, importStartDate, mapping, rows])
+
+  const changeTargetAccount = (nextAccountId: string) => {
+    setAccountId(nextAccountId)
+    const latestDate = finance?.transactions
+      .filter((transaction) => transaction.account_id === nextAccountId)
+      .reduce((latest, transaction) => transaction.transaction_date > latest ? transaction.transaction_date : latest, '')
+    const targetAccount = finance?.accounts.find((account) => account.id === nextAccountId)
+    setImportStartDate(latestDate ? nextDate(latestDate) : targetAccount?.opening_balance_date ?? '')
+  }
 
   const updateSheet = async (selected: string) => {
     if (!fileName) return
@@ -382,6 +500,11 @@ export const ExcelImportPage = () => {
 
   const importRows = async () => {
     if (!user || !accountId) return setError('Select the account to receive these transactions.')
+    const hasSeparateDepositWithdrawal = mapping.deposit && mapping.withdrawal
+    const hasSingleAmount = mapping.amount
+    if (!hasSeparateDepositWithdrawal && !hasSingleAmount) {
+      return setError('Map either both Deposit and Withdrawal columns, or a single Amount column.')
+    }
     const validRows = parsedRows.filter((row) => row.valid && row.transaction)
     if (!validRows.length) return setError('There are no valid rows to import.')
     setImporting(true)
@@ -414,14 +537,25 @@ export const ExcelImportPage = () => {
 
   const importBackup = async () => {
     if (!user || !backup) return
+    if (importStartDate && importEndDate && importStartDate > importEndDate) {
+      setError('Import start date must be on or before the end date.')
+      return
+    }
     setImporting(true)
     setError('')
     setSummary('')
     try {
-      const result = await importFinanceBackup(user.id, backup)
+      const inRange = (date: string) =>
+        (!importStartDate || date >= importStartDate)
+        && (!importEndDate || date <= importEndDate)
+      const result = await importFinanceBackup(user.id, {
+        ...backup,
+        transactions: backup.transactions.filter((transaction) => inRange(transaction.transaction_date)),
+        transfers: backup.transfers.filter((transfer) => inRange(transfer.transfer_date)),
+      })
       const importedTotal = Object.values(result.imported).reduce((sum, count) => sum + count, 0)
       const skippedTotal = Object.values(result.skipped).reduce((sum, count) => sum + count, 0)
-      setSummary(`Imported ${importedTotal} records; skipped ${skippedTotal} records already present.${result.errors.length ? ` ${result.errors.length} items could not be imported: ${result.errors.slice(0, 3).join(' ')}` : ''}`)
+      setSummary(`Imported ${importedTotal} records in the selected date range; skipped ${skippedTotal} records already present. Accounts and categories were merged as backup metadata.${result.errors.length ? ` ${result.errors.length} items could not be imported: ${result.errors.slice(0, 3).join(' ')}` : ''}`)
       await loadFinance()
     } catch (backupError) {
       setError(errorText(backupError))
@@ -431,6 +565,8 @@ export const ExcelImportPage = () => {
   }
 
   const validCount = parsedRows.filter((row) => row.valid).length
+  const hasValidMapping = (mapping.deposit && mapping.withdrawal) || mapping.amount
+  const hasValidImportRange = !importStartDate || !importEndDate || importStartDate <= importEndDate
 
   return (
     <div className="mx-auto max-w-[1200px] space-y-5">
@@ -463,7 +599,12 @@ export const ExcelImportPage = () => {
         <section className="overflow-hidden rounded-xl border border-blue-200 bg-white shadow-sm dark:border-blue-900 dark:bg-slate-900">
           <div className="border-b border-blue-100 bg-blue-50/60 px-5 py-4 dark:border-blue-900 dark:bg-blue-950/30">
             <h2 className="font-semibold text-slate-900 dark:text-slate-100">Finance backup detected</h2>
-            <p className="mt-1 text-sm text-slate-600 dark:text-slate-300">Import is additive: existing records are kept. Matching accounts, categories, transactions, and transfers are skipped.</p>
+            <p className="mt-1 text-sm text-slate-600 dark:text-slate-300">Import is additive: existing records are kept. Matching accounts, categories, transactions, and transfers are skipped. The selected date range applies to transactions and transfers; account and category metadata are merged as needed.</p>
+          </div>
+          <div className="grid gap-4 border-b border-slate-100 p-5 sm:grid-cols-2 dark:border-slate-700">
+            <label className="text-sm font-medium text-slate-700 dark:text-slate-200">Import from<input aria-label="Backup import from date" type="date" value={importStartDate} max={importEndDate || undefined} onChange={(event) => setImportStartDate(event.target.value)} className="mt-1.5 w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm font-normal text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100 dark:[color-scheme:dark]" /></label>
+            <label className="text-sm font-medium text-slate-700 dark:text-slate-200">Import through<input aria-label="Backup import through date" type="date" value={importEndDate} min={importStartDate || undefined} onChange={(event) => setImportEndDate(event.target.value)} className="mt-1.5 w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm font-normal text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100 dark:[color-scheme:dark]" /></label>
+            {!hasValidImportRange && <p role="alert" className="text-sm text-rose-700 dark:text-rose-300 sm:col-span-2">Import start date must be on or before the end date.</p>}
           </div>
           <div className="grid gap-3 p-5 sm:grid-cols-4">
             {[
@@ -474,7 +615,7 @@ export const ExcelImportPage = () => {
             ].map(([label, count]) => <div key={label} className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 dark:border-slate-700 dark:bg-slate-800"><p className="text-xs text-slate-500 dark:text-slate-400">{label}</p><p className="mt-1 text-lg font-semibold text-slate-900 dark:text-slate-100">{count}</p></div>)}
           </div>
           <div className="flex justify-end border-t border-slate-100 bg-slate-50/70 px-5 py-4 dark:border-slate-700 dark:bg-slate-800/50">
-            <button type="button" disabled={importing || loading} onClick={() => void importBackup()} className="rounded-lg bg-blue-700 px-4 py-2.5 text-sm font-medium text-white hover:bg-blue-800 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-blue-600 dark:hover:bg-blue-500">{importing ? 'Importing backup…' : 'Merge backup into my data'}</button>
+            <button type="button" disabled={importing || loading || !hasValidImportRange} onClick={() => void importBackup()} className="rounded-lg bg-blue-700 px-4 py-2.5 text-sm font-medium text-white hover:bg-blue-800 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-blue-600 dark:hover:bg-blue-500">{importing ? 'Importing backup…' : 'Merge backup into my data'}</button>
           </div>
         </section>
       )}
@@ -482,31 +623,92 @@ export const ExcelImportPage = () => {
       {headers.length > 0 && (
         <>
           <section className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-700 dark:bg-slate-900">
-            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-              <label className="text-sm font-medium text-slate-700 dark:text-slate-200">Worksheet<select value={sheetName} onChange={(event) => void updateSheet(event.target.value)} className="mt-1.5 w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm font-normal text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100 dark:[color-scheme:dark]">{sheetNames.map((sheet) => <option key={sheet}>{sheet}</option>)}</select></label>
-              <label className="text-sm font-medium text-slate-700 dark:text-slate-200">Target account<select value={accountId} onChange={(event) => setAccountId(event.target.value)} className="mt-1.5 w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm font-normal text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100 dark:[color-scheme:dark]"><option value="">Select account</option>{finance?.accounts.map((account) => <option key={account.id} value={account.id}>{account.account_name} · {account.bank_name}</option>)}</select></label>
-              {([
-                ['date', 'Date column', true],
-                ['description', 'Description column', true],
-                ['amount', 'Amount column', true],
-                ['type', 'Type / debit-credit column', false],
-                ['category', 'Category column', false],
-                ['reference', 'Reference number column', false],
-              ] as const).map(([key, label, required]) => (
-                <label key={key} className="text-sm font-medium text-slate-700 dark:text-slate-200">{label}{!required && <span className="ml-1 text-xs font-normal text-slate-400 dark:text-slate-500">Optional</span>}
-                  <select required={required} value={mapping[key]} onChange={(event) => setMapping({ ...mapping, [key]: event.target.value })} className="mt-1.5 w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm font-normal text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100 dark:[color-scheme:dark]">
-                    <option value="">{required ? 'Select column' : 'Do not map'}</option>
-                    {headers.map((header, index) => <option key={`${header}-${index}`} value={header}>{header}</option>)}
-                  </select>
-                </label>
-              ))}
+            <div className="flex items-start justify-between gap-4 mb-4">
+              <div className="flex-1">
+                <h3 className="text-lg font-semibold text-slate-900 dark:text-slate-100">Column Mapping</h3>
+                <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">Map your file's columns to the application's statement fields. Required fields are marked with <span className="text-rose-500">*</span>.</p>
+              </div>
+              <div className="flex items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
+                <span className="flex items-center gap-1 px-2 py-1 rounded bg-emerald-50 text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-300"><CheckCircle2 className="h-3 w-3" /> Auto-detected</span>
+                <span className="flex items-center gap-1 px-2 py-1 rounded bg-blue-50 text-blue-700 dark:bg-blue-950/30 dark:text-blue-300"><HelpCircle className="h-3 w-3" /> Hover for details</span>
+              </div>
             </div>
+
+            <div className="space-y-3">
+              {(() => {
+                const targetFields: Array<{ key: keyof Mapping; label: string; required: boolean; description: string; appHeader: string }> = [
+                  { key: 'date', label: 'Date', required: true, description: 'Transaction date (e.g., 15/01/2026, 2026-01-15, 15-Jan-2026)', appHeader: 'Date' },
+                  { key: 'description', label: 'Description', required: true, description: 'Transaction description/narration (e.g., "Salary Credit", "Rent Payment")', appHeader: 'Description' },
+                  { key: 'deposit', label: 'Deposit (Credit)', required: false, description: 'Deposit/Credit amount column. Map your Credit column here. Either this or Withdrawal is required.', appHeader: 'Deposit' },
+                  { key: 'withdrawal', label: 'Withdrawal (Debit)', required: false, description: 'Withdrawal/Debit amount column. Map your Debit column here. Either this or Deposit is required.', appHeader: 'Withdrawal' },
+                  { key: 'amount', label: 'Amount (Single Column)', required: false, description: 'Single amount column (use with Type column below). Use this OR Deposit/Withdrawal above, not both.', appHeader: 'Deposit / Withdrawal' },
+                  { key: 'type', label: 'Type (Debit/Credit)', required: false, description: 'Indicates deposit or withdrawal. Keywords: deposit/credit/income/cr → Deposit; withdrawal/debit/expense/dr → Withdrawal', appHeader: 'Type' },
+                  { key: 'category', label: 'Category', required: false, description: 'Category name (must match existing categories in app). Leave empty to categorize later.', appHeader: 'Category' },
+                  { key: 'reference', label: 'Reference Number', required: false, description: 'Cheque number, transaction ID, or reference (e.g., CHQ12345, TXN789)', appHeader: 'Reference' },
+                ]
+
+                return targetFields.map(({ key, label, required, description, appHeader }) => {
+                  const mappedHeader = mapping[key]
+                  const sampleValues = mappedHeader ? getSampleValues(mappedHeader, 3) : []
+                  const isAutoMapped = mappedHeader && mapHeader(headers, getAliasesForKey(key)).toLowerCase() === mappedHeader.toLowerCase()
+
+                  return (
+                    <div key={key} className="rounded-lg border border-slate-200 bg-slate-50/50 p-4 dark:border-slate-700 dark:bg-slate-800/50 transition-colors hover:border-slate-300 dark:hover:border-slate-600">
+                      <div className="flex items-start justify-between gap-4">
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="font-medium text-slate-900 dark:text-slate-100">{label}{required && <span className="text-rose-500 ml-1">*</span>}</span>
+                            <span className="px-2 py-0.5 text-[10px] font-medium rounded bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-400">Target: {appHeader}</span>
+                            {isAutoMapped && <span className="px-2 py-0.5 text-[10px] font-medium rounded bg-emerald-50 text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-300 flex items-center gap-1"><CheckCircle2 className="h-3 w-3" /> Auto-mapped</span>}
+                          </div>
+                          <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">{description}</p>
+                        </div>
+                        <div className="flex items-center gap-2 shrink-0">
+                          <select
+                            required={required}
+                            value={mappedHeader}
+                            onChange={(event) => setMapping({ ...mapping, [key]: event.target.value })}
+                            className="w-full sm:w-64 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-normal text-slate-900 outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100 dark:focus:border-blue-400 dark:focus:ring-blue-950 dark:[color-scheme:dark]"
+                          >
+                            <option value="">{required ? 'Select source column…' : 'Do not map'}</option>
+                            {headers.map((header, index) => (
+                              <option key={`${header}-${index}`} value={header}>
+                                {header}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                      </div>
+
+                      {mappedHeader && sampleValues.length > 0 && (
+                        <div className="mt-3 pt-3 border-t border-slate-200 dark:border-slate-700">
+                          <p className="text-xs font-medium text-slate-500 dark:text-slate-400 mb-2">Sample values from your file:</p>
+                          <div className="flex flex-wrap gap-1.5">
+                            {sampleValues.map((val, i) => (
+                              <span key={i} className="px-2 py-1 text-xs bg-white dark:bg-slate-700 border border-slate-200 dark:border-slate-600 rounded font-mono text-slate-700 dark:text-slate-200">{val}</span>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )
+                })
+              })()}
+            </div>
+
+            <div className="mt-4 grid gap-4 sm:grid-cols-2">
+              <label className="text-sm font-medium text-slate-700 dark:text-slate-200">Worksheet<select value={sheetName} onChange={(event) => void updateSheet(event.target.value)} className="mt-1.5 w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm font-normal text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100 dark:[color-scheme:dark]">{sheetNames.map((sheet) => <option key={sheet}>{sheet}</option>)}</select></label>
+              <label className="text-sm font-medium text-slate-700 dark:text-slate-200">Target account<select value={accountId} onChange={(event) => changeTargetAccount(event.target.value)} className="mt-1.5 w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm font-normal text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100 dark:[color-scheme:dark]"><option value="">Select account</option>{finance?.accounts.map((account) => <option key={account.id} value={account.id}>{account.account_name} · {account.bank_name}</option>)}</select></label>
+              <label className="text-sm font-medium text-slate-700 dark:text-slate-200">Import from<input aria-label="Import from date" type="date" value={importStartDate} max={importEndDate || undefined} onChange={(event) => setImportStartDate(event.target.value)} className="mt-1.5 w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm font-normal text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100 dark:[color-scheme:dark]" /></label>
+              <label className="text-sm font-medium text-slate-700 dark:text-slate-200">Import through<input aria-label="Import through date" type="date" value={importEndDate} min={importStartDate || undefined} onChange={(event) => setImportEndDate(event.target.value)} className="mt-1.5 w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm font-normal text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100 dark:[color-scheme:dark]" /></label>
+            </div>
+            <p className="mt-3 text-xs text-slate-500 dark:text-slate-400">The start date is suggested as the day after the latest transaction already in this account. Dates are inclusive; rows outside this window and duplicate transactions are excluded from import.</p>
           </section>
 
           <section className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm dark:border-slate-700 dark:bg-slate-900">
             <div className="flex flex-col justify-between gap-3 border-b border-slate-200 px-4 py-4 dark:border-slate-700 sm:flex-row sm:items-center sm:px-5">
-              <div><h2 className="font-semibold text-slate-900 dark:text-slate-100">Import preview</h2><p className="mt-1 text-xs text-slate-500 dark:text-slate-400">{validCount} valid · {parsedRows.length - validCount} need correction · first 10 rows shown</p></div>
-              <button type="button" disabled={importing || loading || !accountId || !validCount} onClick={() => void importRows()} className="rounded-lg bg-blue-700 px-3.5 py-2 text-sm font-medium text-white hover:bg-blue-800 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-blue-600 dark:hover:bg-blue-500">{importing ? 'Importing…' : `Import ${validCount} valid rows`}</button>
+              <div><h2 className="font-semibold text-slate-900 dark:text-slate-100">Import preview</h2><p className="mt-1 text-xs text-slate-500 dark:text-slate-400">{validCount} valid to import · {parsedRows.length - validCount} excluded by date range, duplicates, or validation · first 10 rows shown</p></div>
+              <button type="button" disabled={importing || loading || !accountId || !validCount || !hasValidMapping} onClick={() => void importRows()} className="rounded-lg bg-blue-700 px-3.5 py-2 text-sm font-medium text-white hover:bg-blue-800 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-blue-600 dark:hover:bg-blue-500">{importing ? 'Importing…' : `Import ${validCount} valid rows`}</button>
             </div>
             <div className="overflow-x-auto">
               <table className="min-w-full text-left text-sm">

@@ -600,6 +600,35 @@ export function getTransactionMovement(transaction: TransactionRecord, transfers
   return -transaction.amount
 }
 
+export function calculateOpeningBalance(data: FinanceData, startDate?: string, accountId?: string): number {
+  return data.accounts
+    .filter((account) => !accountId || account.id === accountId)
+    .reduce((total, account) => {
+      if (startDate && account.opening_balance_date > startDate) return total
+      const movementBeforeStart = startDate
+        ? data.transactions
+          .filter((transaction) => transaction.account_id === account.id
+            && transaction.transaction_date >= account.opening_balance_date
+            && transaction.transaction_date < startDate)
+          .reduce((balance, transaction) => balance + getTransactionMovement(transaction, data.transfers), 0)
+        : 0
+      return total + account.opening_balance + movementBeforeStart
+    }, 0)
+}
+
+export function calculateBalanceAsOf(data: FinanceData, endDate: string, accountId?: string): number {
+  return data.accounts
+    .filter((account) => (!accountId || account.id === accountId) && account.opening_balance_date <= endDate)
+    .reduce((total, account) => {
+      const movement = data.transactions
+        .filter((transaction) => transaction.account_id === account.id
+          && transaction.transaction_date >= account.opening_balance_date
+          && transaction.transaction_date <= endDate)
+        .reduce((balance, transaction) => balance + getTransactionMovement(transaction, data.transfers), 0)
+      return total + account.opening_balance + movement
+    }, 0)
+}
+
 function recalculateDemoBalances(data: FinanceData) {
   for (const account of data.accounts) {
     account.current_balance = account.opening_balance + data.transactions

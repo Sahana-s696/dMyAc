@@ -1,8 +1,9 @@
-import { Fragment, useCallback, useEffect, useMemo, useState, type FormEvent } from 'react'
-import { ArrowDownLeft, ArrowLeftRight, ArrowUpRight, ChevronDown, ChevronUp, Plus, Search, X, Edit, Trash2 } from 'lucide-react'
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type MouseEvent as ReactMouseEvent } from 'react'
+import { ArrowDownLeft, ArrowLeftRight, ArrowUpRight, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Plus, Search, X, Edit, Trash2 } from 'lucide-react'
 import { useLocation, useNavigate } from 'react-router-dom'
+import { AccountViewSwitcher } from '../components/accounts/AccountViewSwitcher'
 import { useAuth } from '../context/AuthContext'
-import { compareTransactionsChronologically, createTransaction, createTransfer, deleteTransaction, getTransactionMovement, groupTransactionEntries, loadFinanceData, updateTransaction, updateTransfer, type FinanceData, type NewTransaction, type TransactionRecord, type UpdateTransaction } from '../lib/financeData'
+import { calculateBalanceAsOf, calculateOpeningBalance, compareTransactionsChronologically, createTransaction, createTransfer, deleteTransaction, getTransactionMovement, groupTransactionEntries, loadFinanceData, updateTransaction, updateTransfer, type FinanceData, type NewTransaction, type TransactionRecord, type UpdateTransaction } from '../lib/financeData'
 
 type Operation = 'deposit' | 'withdrawal' | 'transfer'
 type TransactionForm = {
@@ -79,6 +80,14 @@ export const TransactionsPage = () => {
   })
   const [dateFrom, setDateFrom] = useState('')
   const [dateTo, setDateTo] = useState('')
+  const [pageSize, setPageSize] = useState(10)
+  const [page, setPage] = useState(1)
+  const [columnWidths, setColumnWidths] = useState<number[]>([110, 190, 140, 280, 130, 130, 130, 90])
+  const [returnToView, setReturnToView] = useState<'statement' | 'activity' | null>(null)
+  const [resizingColumn, setResizingColumn] = useState<number | null>(null)
+  const [resizeStartX, setResizeStartX] = useState(0)
+  const [resizeStartWidth, setResizeStartWidth] = useState(0)
+  const thRefs = useRef<(HTMLTableCellElement | null)[]>([])
   const [expandedTransferGroups, setExpandedTransferGroups] = useState<Set<string>>(() => new Set())
   const [editingTransaction, setEditingTransaction] = useState<TransactionRecord | null>(null)
   const [editForm, setEditForm] = useState<UpdateTransaction & { account_id: string; reference_number: string; notes: string }>({
@@ -125,6 +134,10 @@ export const TransactionsPage = () => {
         : ''
       setForm({ ...emptyForm(), account_id: requestedAccount })
     }
+    const returnTo = location.state && typeof location.state === 'object' && 'returnTo' in location.state && (location.state.returnTo === 'statement' || location.state.returnTo === 'activity')
+      ? location.state.returnTo
+      : null
+    setReturnToView(returnTo)
   }, [location.state])
 
   const filteredCategories = data?.categories.filter((category) =>
@@ -133,6 +146,38 @@ export const TransactionsPage = () => {
         : category.category_type === 'expense',
   ) ?? []
   const balances = useMemo(() => data ? runningBalances(data) : new Map<string, number>(), [data])
+  const handleResizeMouseDown = (index: number, event: ReactMouseEvent<HTMLDivElement>) => {
+    event.preventDefault()
+    event.stopPropagation()
+    const th = thRefs.current[index]
+    if (!th) return
+    setResizingColumn(index)
+    setResizeStartX(event.clientX)
+    setResizeStartWidth(th.offsetWidth)
+  }
+  const handleResizeMouseMove = useCallback((event: MouseEvent) => {
+    if (resizingColumn === null) return
+    const width = Math.max(60, resizeStartWidth + event.clientX - resizeStartX)
+    setColumnWidths((previous) => {
+      const next = [...previous]
+      next[resizingColumn] = width
+      return next
+    })
+  }, [resizingColumn, resizeStartWidth, resizeStartX])
+  useEffect(() => {
+    if (resizingColumn === null) return
+    const handleMouseUp = () => setResizingColumn(null)
+    window.addEventListener('mousemove', handleResizeMouseMove)
+    window.addEventListener('mouseup', handleMouseUp)
+    document.body.style.cursor = 'col-resize'
+    document.body.style.userSelect = 'none'
+    return () => {
+      window.removeEventListener('mousemove', handleResizeMouseMove)
+      window.removeEventListener('mouseup', handleMouseUp)
+      document.body.style.cursor = ''
+      document.body.style.userSelect = ''
+    }
+  }, [handleResizeMouseMove, resizingColumn])
 
   const transactions = useMemo(() => {
     if (!data) return []
@@ -155,6 +200,11 @@ export const TransactionsPage = () => {
         return matchesSearch && matchesAccount && matchesCategory && matchesFrom && matchesTo && matchesType
       })
   }, [data, search, accountFilter, categoryFilter, typeFilter, dateFrom, dateTo])
+  const pageCount = Math.max(1, Math.ceil(transactions.length / pageSize))
+  const currentPage = Math.min(page, pageCount)
+  const pageRows = transactions.slice((currentPage - 1) * pageSize, currentPage * pageSize)
+  const firstVisibleRow = transactions.length === 0 ? 0 : (currentPage - 1) * pageSize + 1
+  const lastVisibleRow = Math.min(currentPage * pageSize, transactions.length)
 
   const toggleTransferDetails = (groupId: string) => {
     setExpandedTransferGroups((current) => {
@@ -167,8 +217,16 @@ export const TransactionsPage = () => {
 
   const openForm = (kind: Operation) => {
     setOperation(kind)
-    setForm(emptyForm())
+    setForm({ ...emptyForm(), account_id: accountFilter === 'all' ? '' : accountFilter })
     setError('')
+  }
+
+  const returnToAccountView = (accountId: string) => {
+    if (returnToView === 'statement') {
+      navigate(`/accounts/${encodeURIComponent(accountId)}`, { replace: true })
+    } else if (returnToView === 'activity') {
+      navigate(`/transactions?accountId=${encodeURIComponent(accountId)}`, { replace: true })
+    }
   }
 
   const submitTransaction = async (event: FormEvent<HTMLFormElement>) => {
@@ -222,6 +280,7 @@ export const TransactionsPage = () => {
       setOperation(null)
       setForm(emptyForm())
       await reload()
+      returnToAccountView(form.account_id)
     } catch (submitError) {
       setError(messageForError(submitError))
     } finally {
@@ -313,6 +372,7 @@ export const TransactionsPage = () => {
       }
       setEditingTransaction(null)
       await reload()
+      returnToAccountView(editForm.account_id)
     } catch (submitError) {
       setError(messageForError(submitError))
     } finally {
@@ -350,6 +410,28 @@ export const TransactionsPage = () => {
   const totalDeposits = statementTotals.deposits
   const totalWithdrawals = statementTotals.withdrawals
   const totalVisible = transactions.length
+  const periodTotals = (data?.transactions ?? [])
+    .filter((transaction) =>
+      (accountFilter === 'all' || transaction.account_id === accountFilter)
+      && (!dateFrom || transaction.transaction_date >= dateFrom)
+      && (!dateTo || transaction.transaction_date <= dateTo),
+    )
+    .reduce((totals, transaction) => {
+      const movement = getTransactionMovement(transaction, data?.transfers ?? [])
+      if (movement > 0) totals.deposits += movement
+      if (movement < 0) totals.withdrawals += Math.abs(movement)
+      return totals
+    }, { deposits: 0, withdrawals: 0 })
+  const periodOpeningBalance = data
+    ? calculateOpeningBalance(data, dateFrom || undefined, accountFilter === 'all' ? undefined : accountFilter)
+    : 0
+  const periodBalance = data
+    ? dateTo
+      ? calculateBalanceAsOf(data, dateTo, accountFilter === 'all' ? undefined : accountFilter)
+      : data.accounts
+        .filter((account) => accountFilter === 'all' || account.id === accountFilter)
+        .reduce((total, account) => total + account.current_balance, 0)
+    : 0
 
   return (
     <div className="mx-auto max-w-[1500px] space-y-6">
@@ -358,6 +440,11 @@ export const TransactionsPage = () => {
           <p className="text-sm font-semibold text-blue-700">ACCOUNT ACTIVITY</p>
           <h1 className="mt-1 text-2xl font-semibold tracking-tight text-slate-900">Transactions</h1>
           <p className="mt-1 text-sm text-slate-500">Review deposits, withdrawals, and transfers across your accounts.</p>
+          {accountFilter !== 'all' && data?.accounts.some((account) => account.id === accountFilter) && (
+            <div className="mt-3">
+              <AccountViewSwitcher accountId={accountFilter} activeView="activity" />
+            </div>
+          )}
         </div>
         <div className="flex flex-wrap gap-2">
           <button type="button" onClick={() => openForm('deposit')} className="inline-flex items-center gap-2 rounded-lg bg-emerald-700 px-3.5 py-2.5 text-sm font-medium text-white hover:bg-emerald-800"><ArrowDownLeft className="h-4 w-4" /> Deposit</button>
@@ -369,37 +456,68 @@ export const TransactionsPage = () => {
       {error && !operation && <div role="alert" className="rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-800">{error}</div>}
 
        <section className="overflow-hidden rounded-xl border border-slate-200 bg-white dark:bg-slate-800 shadow-sm">
-         <div className="border-b border-slate-200 dark:border-slate-600 px-4 py-4 sm:px-5">
-           <h2 className="font-semibold text-slate-900 dark:text-slate-100">Transaction statement</h2>
-           <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">{totalVisible} displayed lines · Transfer lines combine paired account entries; expand for details</p>
+         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-4 py-4 dark:border-slate-600 sm:px-5">
+           <div>
+             <h2 className="font-semibold text-slate-900 dark:text-slate-100">Transaction statement</h2>
+             <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">{totalVisible} matching lines · Transfer lines combine paired account entries; expand for details</p>
+           </div>
+           <div className="flex flex-wrap items-center gap-2">
+             <label className="flex items-center gap-1.5 text-sm text-slate-600 dark:text-slate-300">
+               Page size
+               <select aria-label="Top rows per page" value={pageSize} onChange={(event) => { setPageSize(Number(event.target.value)); setPage(1) }} className="rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-sm text-slate-700 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100 dark:[color-scheme:dark]">
+                 {[5, 10, 15, 20, 25].map((size) => <option key={size} value={size}>{size}</option>)}
+               </select>
+             </label>
+             <span className="min-w-14 text-center text-sm text-slate-500 dark:text-slate-400">Page {currentPage} of {pageCount}</span>
+             <button type="button" onClick={() => setPage(currentPage - 1)} disabled={currentPage <= 1} aria-label="Previous page" className="rounded-lg border border-slate-200 p-1.5 text-slate-600 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40 dark:border-slate-600 dark:text-slate-300 dark:hover:bg-slate-700"><ChevronLeft className="h-4 w-4" /></button>
+             <button type="button" onClick={() => setPage(currentPage + 1)} disabled={currentPage >= pageCount} aria-label="Next page" className="rounded-lg border border-slate-200 p-1.5 text-slate-600 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40 dark:border-slate-600 dark:text-slate-300 dark:hover:bg-slate-700"><ChevronRight className="h-4 w-4" /></button>
+           </div>
          </div>
         <div className="grid gap-2 border-b border-slate-200 p-4 dark:border-slate-600 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
           <label className="relative">
             <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-600 dark:text-slate-100" />
-            <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search description, reference..." className="w-full rounded-lg border border-slate-200 bg-white py-2 pl-9 pr-3 text-sm text-slate-900 outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100 dark:focus:border-blue-300 dark:focus:ring-blue-300" />
+            <input value={search} onChange={(event) => { setSearch(event.target.value); setPage(1) }} placeholder="Search description, reference..." className="w-full rounded-lg border border-slate-200 bg-white py-2 pl-9 pr-3 text-sm text-slate-900 outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100 dark:focus:border-blue-300 dark:focus:ring-blue-300" />
           </label>
-          <select aria-label="Filter by account" value={accountFilter} onChange={(event) => setAccountFilter(event.target.value)} className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50 dark:[color-scheme:dark]">
+          <select aria-label="Filter by account" value={accountFilter} onChange={(event) => { setAccountFilter(event.target.value); setPage(1) }} className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50 dark:[color-scheme:dark]">
             <option value="all">All accounts</option>
             {data?.accounts.map((account) => <option key={account.id} value={account.id}>{account.account_name}</option>)}
           </select>
-          <select aria-label="Filter by transaction type" value={typeFilter} onChange={(event) => setTypeFilter(event.target.value)} className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50 dark:[color-scheme:dark]">
+          <select aria-label="Filter by transaction type" value={typeFilter} onChange={(event) => { setTypeFilter(event.target.value); setPage(1) }} className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50 dark:[color-scheme:dark]">
             <option value="all">All types</option>
             <option value="deposit">Deposits</option>
             <option value="withdrawal">Withdrawals</option>
             <option value="transfer">Transfers</option>
           </select>
-          <select aria-label="Filter by category" value={categoryFilter} onChange={(event) => setCategoryFilter(event.target.value)} className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50 dark:[color-scheme:dark]">
+          <select aria-label="Filter by category" value={categoryFilter} onChange={(event) => { setCategoryFilter(event.target.value); setPage(1) }} className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-50 dark:[color-scheme:dark]">
             <option value="all">All categories</option>
             {data?.categories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}
           </select>
           <label className="flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-2.5 text-xs text-slate-700 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100">
             <span>From</span>
-            <input aria-label="Date from" type="date" value={dateFrom} onChange={(event) => setDateFrom(event.target.value)} className="min-w-0 bg-transparent py-2 text-xs text-slate-950 outline-none dark:text-slate-50 dark:[color-scheme:dark]" />
+            <input aria-label="Date from" type="date" value={dateFrom} onChange={(event) => { setDateFrom(event.target.value); setPage(1) }} className="min-w-0 bg-transparent py-2 text-xs text-slate-950 outline-none dark:text-slate-50 dark:[color-scheme:dark]" />
           </label>
           <label className="flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-2.5 text-xs text-slate-700 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100">
             <span>To</span>
-            <input aria-label="Date to" type="date" value={dateTo} onChange={(event) => setDateTo(event.target.value)} className="min-w-0 bg-transparent py-2 text-xs text-slate-950 outline-none dark:text-slate-50 dark:[color-scheme:dark]" />
+            <input aria-label="Date to" type="date" value={dateTo} onChange={(event) => { setDateTo(event.target.value); setPage(1) }} className="min-w-0 bg-transparent py-2 text-xs text-slate-950 outline-none dark:text-slate-50 dark:[color-scheme:dark]" />
           </label>
+        </div>
+        <div className="grid grid-cols-2 gap-1.5 border-b border-slate-200 p-3 dark:border-slate-600 sm:grid-cols-4">
+          <div className="rounded-md border border-slate-200 bg-slate-50 px-2.5 py-1.5 dark:border-slate-700 dark:bg-slate-900/40">
+            <p className="text-[10px] text-slate-500 dark:text-slate-400">{dateFrom ? `Opening balance before ${dateLabel(dateFrom)}` : 'Opening balance'}</p>
+            <p className="mt-0.5 text-[11px] font-semibold tabular-nums text-slate-800 dark:text-slate-200">{currency(periodOpeningBalance)}</p>
+          </div>
+          <div className="rounded-md border border-emerald-100 bg-emerald-50/60 px-2.5 py-1.5 dark:border-emerald-900/70 dark:bg-emerald-950/30">
+            <p className="text-[10px] text-slate-500 dark:text-slate-400">Deposits</p>
+            <p className="mt-0.5 text-[11px] font-semibold tabular-nums text-emerald-700 dark:text-emerald-400">{currency(periodTotals.deposits)}</p>
+          </div>
+          <div className="rounded-md border border-rose-100 bg-rose-50/60 px-2.5 py-1.5 dark:border-rose-900/70 dark:bg-rose-950/30">
+            <p className="text-[10px] text-slate-500 dark:text-slate-400">Withdrawals</p>
+            <p className="mt-0.5 text-[11px] font-semibold tabular-nums text-rose-700 dark:text-rose-400">{currency(periodTotals.withdrawals)}</p>
+          </div>
+          <div className="rounded-md border border-slate-200 bg-slate-50 px-2.5 py-1.5 dark:border-slate-700 dark:bg-slate-900/40">
+            <p className="text-[10px] text-slate-500 dark:text-slate-400">{dateTo ? `Balance through ${dateLabel(dateTo)}` : 'Balance'}</p>
+            <p className="mt-0.5 text-[11px] font-semibold tabular-nums text-slate-800 dark:text-slate-200">{currency(periodBalance)}</p>
+          </div>
         </div>
 
         {loading ? (
@@ -414,21 +532,30 @@ export const TransactionsPage = () => {
         ) : (
           <>
             <div className="hidden overflow-x-auto md:block">
-              <table className="min-w-full text-left text-sm">
+              <table className="min-w-[1190px] w-full table-fixed text-left text-sm">
 <thead className="bg-slate-50 text-[10px] uppercase tracking-wide text-slate-500 dark:bg-slate-700 dark:text-slate-400">
                   <tr>
-<th className="px-3 py-2 font-semibold">Date</th>
-                       <th className="px-3 py-2 font-semibold">Account</th>
-                       <th className="px-3 py-2 font-semibold">Category</th>
-                       <th className="px-3 py-2 font-semibold">Description</th>
-                       <th className="px-3 py-2 text-right font-semibold">Deposit</th>
-                       <th className="px-3 py-2 text-right font-semibold">Withdrawal</th>
-                       <th className="px-3 py-2 text-right font-semibold">Balance</th>
-                       <th className="px-3 py-2 text-right font-semibold">Actions</th>
+                    {['Date', 'Account', 'Category', 'Description', 'Deposit', 'Withdrawal', 'Balance', 'Actions'].map((label, index) => (
+                      <th
+                        key={label}
+                        ref={(element) => { thRefs.current[index] = element }}
+                        className={`relative px-3 py-2 font-semibold ${index >= 4 ? 'text-right' : ''}`}
+                        style={{ width: columnWidths[index] }}
+                      >
+                        {label}
+                        <div
+                          role="separator"
+                          aria-orientation="vertical"
+                          aria-label={`Resize ${label} column`}
+                          className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-blue-300"
+                          onMouseDown={(event) => handleResizeMouseDown(index, event)}
+                        />
+                      </th>
+                    ))}
                    </tr>
                  </thead>
                 <tbody>
-                  {transactions.map(({ id, transaction: row, entries, transfer }) => {
+                  {pageRows.map(({ id, transaction: row, entries, transfer }) => {
                     const account = data?.accounts.find((item) => item.id === row.account_id)
                     const category = data?.categories.find((item) => item.id === row.category_id)
                     const relevantEntry = accountFilter === 'all' ? row : entries.find((entry) => entry.account_id === accountFilter) ?? row
@@ -440,17 +567,17 @@ export const TransactionsPage = () => {
                     return (
                       <Fragment key={id}>
                       <tr className="transaction-row border-t border-slate-200 dark:border-slate-600">
-                        <td className="whitespace-nowrap px-3 py-1 font-medium text-[13px] text-slate-800 dark:text-slate-200">{dateLabel(row.transaction_date)}</td>
-                        <td className="whitespace-nowrap px-3 py-1 text-[12px] text-slate-600 dark:text-slate-300">
+                        <td style={{ width: columnWidths[0] }} className="whitespace-nowrap px-3 py-1 font-medium text-[13px] text-slate-800 dark:text-slate-200">{dateLabel(row.transaction_date)}</td>
+                        <td style={{ width: columnWidths[1] }} className="whitespace-nowrap px-3 py-1 text-[12px] text-slate-600 dark:text-slate-300">
                           {kind === 'transfer' ? <p className="text-blue-700 dark:text-blue-300">{sourceAccount?.account_name ?? account?.account_name ?? '—'} → {destinationAccount?.account_name ?? '—'}</p> : <p>{account?.account_name ?? '—'}</p>}
                           {kind === 'deposit' && <p className="text-[10px] text-emerald-700 dark:text-emerald-300">From: External source (not recorded) · To: {account?.account_name ?? '—'}</p>}
                         </td>
-                        <td className="whitespace-nowrap px-3 py-1 text-[12px] text-slate-600 dark:text-slate-300">{category?.name ?? (kind === 'transfer' ? 'Account transfer' : '—')}</td>
-                        <td className="whitespace-nowrap px-3 py-1 text-[12px] text-slate-600 dark:text-slate-300"><p className="font-medium">{row.description}</p>{row.reference_number && <p className="mt-0.5 text-[10px]">Ref: {row.reference_number}</p>}{kind === 'transfer' && <button type="button" onClick={() => toggleTransferDetails(id)} aria-expanded={isExpanded} className="mt-0.5 inline-flex items-center gap-1 text-[10px] font-medium text-blue-700 hover:underline dark:text-blue-300">{isExpanded ? 'Hide' : 'Show'} {entries.length} account entries {isExpanded ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}</button>}</td>
-                        <td className="whitespace-nowrap px-3 py-1 text-right text-[12px] font-semibold text-emerald-700 dark:text-emerald-300">{amounts.deposit > 0 ? `+${currency(amounts.deposit)}` : '—'}</td>
-                        <td className="whitespace-nowrap px-3 py-1 text-right text-[12px] font-semibold text-rose-700 dark:text-rose-300">{amounts.withdrawal > 0 ? `−${currency(amounts.withdrawal)}` : '—'}</td>
-                        <td className="whitespace-nowrap px-3 py-1 text-right text-[12px] font-semibold text-slate-900 dark:text-slate-100">{currency(balances.get(relevantEntry.id) ?? data?.accounts.find((item) => item.id === relevantEntry.account_id)?.current_balance ?? 0)}</td>
-                        <td className="px-3 py-1 text-right">
+                        <td style={{ width: columnWidths[2] }} className="whitespace-nowrap px-3 py-1 text-[12px] text-slate-600 dark:text-slate-300">{category?.name ?? (kind === 'transfer' ? 'Account transfer' : '—')}</td>
+                        <td style={{ width: columnWidths[3] }} className="whitespace-nowrap px-3 py-1 text-[12px] text-slate-600 dark:text-slate-300"><p className="font-medium">{row.description}</p>{row.reference_number && <p className="mt-0.5 text-[10px]">Ref: {row.reference_number}</p>}{kind === 'transfer' && <button type="button" onClick={() => toggleTransferDetails(id)} aria-expanded={isExpanded} className="mt-0.5 inline-flex items-center gap-1 text-[10px] font-medium text-blue-700 hover:underline dark:text-blue-300">{isExpanded ? 'Hide' : 'Show'} {entries.length} account entries {isExpanded ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}</button>}</td>
+                        <td style={{ width: columnWidths[4] }} className="whitespace-nowrap px-3 py-1 text-right text-[12px] font-semibold text-emerald-700 dark:text-emerald-300">{amounts.deposit > 0 ? `+${currency(amounts.deposit)}` : '—'}</td>
+                        <td style={{ width: columnWidths[5] }} className="whitespace-nowrap px-3 py-1 text-right text-[12px] font-semibold text-rose-700 dark:text-rose-300">{amounts.withdrawal > 0 ? `−${currency(amounts.withdrawal)}` : '—'}</td>
+                        <td style={{ width: columnWidths[6] }} className="whitespace-nowrap px-3 py-1 text-right text-[12px] font-semibold text-slate-900 dark:text-slate-100">{currency(balances.get(relevantEntry.id) ?? data?.accounts.find((item) => item.id === relevantEntry.account_id)?.current_balance ?? 0)}</td>
+                        <td style={{ width: columnWidths[7] }} className="px-3 py-1 text-right">
                           <div className="flex justify-end gap-1">
                             <button type="button" onClick={() => openEdit(row)} className="rounded-md p-1.5 text-slate-500 hover:bg-slate-100 hover:text-slate-800 dark:text-slate-300 dark:hover:bg-slate-600 dark:hover:text-slate-200" aria-label={kind === 'transfer' ? 'Edit transfer' : 'Edit transaction'}>
                               <Edit className="h-3.5 w-3.5" />
@@ -493,7 +620,7 @@ export const TransactionsPage = () => {
               </table>
             </div>
             <div className="divide-y divide-slate-100 dark:divide-slate-700 md:hidden">
-              {transactions.map(({ id, transaction: row, entries, transfer }) => {
+              {pageRows.map(({ id, transaction: row, entries, transfer }) => {
                 const amounts = data ? groupAmounts(entries, data.transfers, accountFilter) : { deposit: 0, withdrawal: 0 }
                 const account = data?.accounts.find((item) => item.id === row.account_id)
                 const sourceAccount = transfer ? data?.accounts.find((item) => item.id === transfer.from_account_id) : undefined
@@ -534,6 +661,20 @@ export const TransactionsPage = () => {
                   </article>
                 )
               })}
+            </div>
+            <div className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-200 px-4 py-3 dark:border-slate-700">
+              <p className="text-sm text-slate-500 dark:text-slate-400">Showing {firstVisibleRow}–{lastVisibleRow} of {transactions.length}</p>
+              <div className="flex items-center gap-2">
+                <label className="flex items-center gap-1.5 text-sm text-slate-600 dark:text-slate-300">
+                  Rows
+                  <select aria-label="Bottom rows per page" value={pageSize} onChange={(event) => { setPageSize(Number(event.target.value)); setPage(1) }} className="rounded-md border border-slate-200 bg-white px-2 py-1 text-sm text-slate-700 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100 dark:[color-scheme:dark]">
+                    {[5, 10, 15, 20, 25].map((size) => <option key={size} value={size}>{size}</option>)}
+                  </select>
+                </label>
+                <span className="min-w-14 text-center text-sm text-slate-500 dark:text-slate-400">Page {currentPage} of {pageCount}</span>
+                <button type="button" onClick={() => setPage(currentPage - 1)} disabled={currentPage <= 1} aria-label="Previous page" className="rounded-md border border-slate-200 p-1.5 text-slate-600 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40 dark:border-slate-600 dark:text-slate-300 dark:hover:bg-slate-700"><ChevronLeft className="h-4 w-4" /></button>
+                <button type="button" onClick={() => setPage(currentPage + 1)} disabled={currentPage >= pageCount} aria-label="Next page" className="rounded-md border border-slate-200 p-1.5 text-slate-600 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40 dark:border-slate-600 dark:text-slate-300 dark:hover:bg-slate-700"><ChevronRight className="h-4 w-4" /></button>
+              </div>
             </div>
           </>
         )}

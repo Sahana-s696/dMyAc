@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { ArrowDownLeft, ArrowLeftRight, ArrowUpRight, ChevronLeft, ChevronRight, Download, Printer, ReceiptText, Landmark, PencilLine, Search, Trash2 } from 'lucide-react'
+import { ArrowDownLeft, ArrowLeftRight, ArrowUpRight, ChevronLeft, ChevronRight, Download, Printer, Landmark, PencilLine, Search, Trash2 } from 'lucide-react'
 import { useNavigate, useParams } from 'react-router-dom'
+import { AccountViewSwitcher } from '../components/accounts/AccountViewSwitcher'
 import { useAuth } from '../context/AuthContext'
-import { compareTransactionsChronologically, deleteTransaction, getTransactionMovement, loadFinanceData, type FinanceData } from '../lib/financeData'
+import { calculateBalanceAsOf, calculateOpeningBalance, compareTransactionsChronologically, deleteTransaction, getTransactionMovement, loadFinanceData, type FinanceData } from '../lib/financeData'
 
 const currency = (amount: number) => `Rs. ${amount.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
 const dateLabel = (date: string) => new Intl.DateTimeFormat('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }).format(new Date(`${date}T00:00:00`))
@@ -21,6 +22,7 @@ export const AccountStatementPage = () => {
   const [dateTo, setDateTo] = useState('')
   const [pageSize, setPageSize] = useState(25)
   const [page, setPage] = useState(1)
+  const view: 'statement' | 'activity' = 'statement'
   const [deletingTransactionId, setDeletingTransactionId] = useState<string | null>(null)
 
   const load = useCallback(async () => {
@@ -49,10 +51,22 @@ export const AccountStatementPage = () => {
     })
   }, [account, accountId, data])
 
-  const depositTotal = rows.reduce((total, row) => total + Math.max(row.movement, 0), 0)
-  const withdrawalTotal = rows.reduce((total, row) => total + Math.max(-row.movement, 0), 0)
-  const beginAction = (operation: 'deposit' | 'withdrawal' | 'transfer') => navigate('/transactions', { state: { operation, account_id: accountId } })
-  const editTransaction = (transactionId: string) => navigate('/transactions', { state: { edit_transaction_id: transactionId } })
+  const periodRows = rows.filter(({ transaction }) =>
+    (!dateFrom || transaction.transaction_date >= dateFrom)
+    && (!dateTo || transaction.transaction_date <= dateTo),
+  )
+  const depositTotal = periodRows.reduce((total, row) => total + Math.max(row.movement, 0), 0)
+  const withdrawalTotal = periodRows.reduce((total, row) => total + Math.max(-row.movement, 0), 0)
+  const periodOpeningBalance = data && account
+    ? calculateOpeningBalance(data, dateFrom || undefined, account.id)
+    : account?.opening_balance ?? 0
+  const periodClosingBalance = data && account && dateTo
+    ? dateFrom && dateFrom > dateTo
+      ? periodOpeningBalance
+      : calculateBalanceAsOf(data, dateTo, account.id)
+    : account?.current_balance ?? 0
+  const beginAction = (operation: 'deposit' | 'withdrawal' | 'transfer') => navigate('/transactions', { state: { operation, account_id: accountId, returnTo: view } })
+  const editTransaction = (transactionId: string) => navigate('/transactions', { state: { edit_transaction_id: transactionId, returnTo: view } })
   const removeTransaction = async (transaction: FinanceData['transactions'][number]) => {
     if (!user || deletingTransactionId) return
     const isTransfer = transaction.transaction_type === 'transfer' && Boolean(transaction.transfer_id)
@@ -136,11 +150,14 @@ export const AccountStatementPage = () => {
                     <span className="truncate">{account.account_name}</span>
                   </h1>
                   <div className="rounded-md border border-emerald-100 bg-emerald-50/60 px-2.5 py-1.5 dark:border-emerald-900/70 dark:bg-emerald-950/30">
-                    <span className="text-[10px] font-medium uppercase tracking-wide text-emerald-700 dark:text-emerald-400">Current balance</span>
-                    <span className="ml-1 font-semibold tabular-nums text-emerald-700 dark:text-emerald-400">{currency(account.current_balance)}</span>
+                    <span className="text-[10px] font-medium uppercase tracking-wide text-emerald-700 dark:text-emerald-400">{dateTo ? `Balance through ${dateLabel(dateTo)}` : 'Current balance'}</span>
+                    <span className="ml-1 font-semibold tabular-nums text-emerald-700 dark:text-emerald-400">{currency(periodClosingBalance)}</span>
                   </div>
                 </div>
                 <p className="mt-0.5 text-[11px] text-slate-500 dark:text-slate-400">{account.bank_name} · {account.account_type.replaceAll('_', ' ')}</p>
+                <div className="mt-2">
+                  <AccountViewSwitcher accountId={account.id} activeView="statement" />
+                </div>
               </div>
                <div className="flex flex-wrap gap-1.5 sm:justify-end">
                  <button type="button" onClick={() => beginAction('deposit')} className="inline-flex items-center gap-1 rounded-md bg-emerald-700 px-2 py-1.5 text-[11px] font-medium text-white hover:bg-emerald-800 dark:bg-emerald-600 dark:hover:bg-emerald-700"><ArrowDownLeft className="h-3 w-3" /> Deposit</button>
@@ -151,19 +168,29 @@ export const AccountStatementPage = () => {
                </div>
             </div>
              <dl className="mt-2 grid grid-cols-2 gap-1.5 border-t border-slate-200 pt-2 sm:grid-cols-4 dark:border-slate-700">
-               <div className="rounded-md border border-slate-200 bg-slate-50 px-2.5 py-1.5 dark:border-slate-700 dark:bg-slate-900/40"><dt className="text-[10px] text-slate-500 dark:text-slate-400">Opening balance</dt><dd className="mt-0.5 text-[11px] font-semibold tabular-nums text-slate-800 dark:text-slate-200">{currency(account.opening_balance)}</dd></div>
+               <div className="rounded-md border border-slate-200 bg-slate-50 px-2.5 py-1.5 dark:border-slate-700 dark:bg-slate-900/40"><dt className="text-[10px] text-slate-500 dark:text-slate-400">{dateFrom ? `Opening balance before ${dateLabel(dateFrom)}` : 'Opening balance'}</dt><dd className="mt-0.5 text-[11px] font-semibold tabular-nums text-slate-800 dark:text-slate-200">{currency(periodOpeningBalance)}</dd></div>
                <div className="rounded-md border border-emerald-100 bg-emerald-50/60 px-2.5 py-1.5 dark:border-emerald-900/70 dark:bg-emerald-950/30"><dt className="text-[10px] text-slate-500 dark:text-slate-400">Deposits</dt><dd className="mt-0.5 text-[11px] font-semibold tabular-nums text-emerald-700 dark:text-emerald-400">{currency(depositTotal)}</dd></div>
                <div className="rounded-md border border-rose-100 bg-rose-50/60 px-2.5 py-1.5 dark:border-rose-900/70 dark:bg-rose-950/30"><dt className="text-[10px] text-slate-500 dark:text-slate-400">Withdrawals</dt><dd className="mt-0.5 text-[11px] font-semibold tabular-nums text-rose-700 dark:text-rose-400">{currency(withdrawalTotal)}</dd></div>
-               <div className="rounded-md border border-slate-200 bg-slate-50 px-2.5 py-1.5 dark:border-slate-700 dark:bg-slate-900/40"><dt className="text-[10px] text-slate-500 dark:text-slate-400">Balance</dt><dd className="mt-0.5 text-[11px] font-semibold tabular-nums text-slate-800 dark:text-slate-200">{currency(account.current_balance)}</dd></div>
+               <div className="rounded-md border border-slate-200 bg-slate-50 px-2.5 py-1.5 dark:border-slate-700 dark:bg-slate-900/40"><dt className="text-[10px] text-slate-500 dark:text-slate-400">{dateTo ? `Balance through ${dateLabel(dateTo)}` : 'Current balance'}</dt><dd className="mt-0.5 text-[11px] font-semibold tabular-nums text-slate-800 dark:text-slate-200">{currency(periodClosingBalance)}</dd></div>
              </dl>
           </section>
 
            <section className="overflow-hidden rounded-xl border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 shadow-sm">
-             <div className="space-y-2 border-b border-slate-200 px-3 py-2.5 dark:border-slate-700 sm:px-4">
-               <div className="flex flex-wrap items-center justify-between gap-3">
-                 <div><h2 className="text-sm font-semibold text-slate-900 dark:text-slate-100">Account activity</h2><p className="mt-0.5 text-[11px] text-slate-500 dark:text-slate-400">Oldest transactions first · {visibleRows.length} of {rows.length} entries match</p></div>
-                 <button type="button" onClick={() => navigate(`/transactions?accountId=${encodeURIComponent(accountId)}`)} className="inline-flex items-center gap-1.5 text-xs font-medium text-blue-700 hover:text-blue-900 dark:text-blue-400 dark:hover:text-blue-300"><ReceiptText className="h-3.5 w-3.5" /> All activity</button>
-               </div>
+<div className="space-y-2 border-b border-slate-200 px-3 py-2.5 dark:border-slate-700 sm:px-4">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div><h2 className="text-sm font-semibold text-slate-900 dark:text-slate-100">Account activity</h2><p className="mt-0.5 text-[11px] text-slate-500 dark:text-slate-400">Oldest transactions first · {visibleRows.length} of {rows.length} entries match</p></div>
+                  <div className="flex items-center gap-2">
+                    <label className="flex items-center gap-1.5 text-[11px] text-slate-600 dark:text-slate-300">
+                      Page size
+                      <select aria-label="Top rows per page" value={pageSize} onChange={(event) => { setPageSize(Number(event.target.value)); setPage(1) }} className="rounded-md border border-slate-200 bg-white px-2 py-1.5 text-[11px] text-slate-700 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100 dark:[color-scheme:dark]">
+                        {[5, 10, 15, 20, 25].map((size) => <option key={size} value={size}>{size}</option>)}
+                      </select>
+                    </label>
+                    <span className="min-w-14 text-center text-[11px] text-slate-500 dark:text-slate-400">Page {currentPage} of {pageCount}</span>
+                    <button type="button" onClick={() => setPage(currentPage - 1)} disabled={currentPage <= 1} aria-label="Previous page" className="rounded-md border border-slate-200 p-1 text-slate-600 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40 dark:border-slate-600 dark:text-slate-300 dark:hover:bg-slate-700"><ChevronLeft className="h-3.5 w-3.5" /></button>
+                    <button type="button" onClick={() => setPage(currentPage + 1)} disabled={currentPage >= pageCount} aria-label="Next page" className="rounded-md border border-slate-200 p-1 text-slate-600 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40 dark:border-slate-600 dark:text-slate-300 dark:hover:bg-slate-700"><ChevronRight className="h-3.5 w-3.5" /></button>
+                  </div>
+                </div>
                <div className="grid gap-1.5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
                  <label className="relative">
                    <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500 dark:text-slate-400" />
@@ -192,11 +219,14 @@ export const AccountStatementPage = () => {
                    <input aria-label="Date to" type="date" value={dateTo} onChange={(event) => { setDateTo(event.target.value); setPage(1) }} className="min-w-0 bg-transparent py-1.5 text-[11px] text-slate-900 outline-none dark:text-slate-100 dark:[color-scheme:dark]" />
                  </label>
                </div>
+                 {dateFrom && dateTo && dateFrom > dateTo && (
+                   <p role="alert" className="text-[11px] text-rose-700 dark:text-rose-300">The start date must be on or before the end date.</p>
+                 )}
             </div>
              {visibleRows.length === 0 ? <p className="px-5 py-12 text-center text-sm text-slate-500 dark:text-slate-400">{rows.length === 0 ? 'No transactions posted to this account.' : 'No activity matches these filters.'}</p> : (
               <>
-                 <div className="hidden overflow-x-auto md:block">
-                    <table className="min-w-[1180px] w-full text-left text-xs">
+<div className="hidden overflow-x-auto md:block">
+                     <table className="w-full text-left text-xs" style={{ tableLayout: 'auto' }}>
                       <thead className="bg-slate-50 text-[10px] uppercase tracking-wide text-slate-600 dark:bg-slate-700 dark:text-slate-300">
                         <tr>
                           <th className="px-2.5 py-1.5 font-semibold">Date</th>
@@ -270,21 +300,21 @@ export const AccountStatementPage = () => {
                      )
                    })}
                  </div>
-                 <div className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-200 px-3 py-2 dark:border-slate-700">
-                   <p className="text-[11px] text-slate-500 dark:text-slate-400">Showing {firstVisibleRow}–{lastVisibleRow} of {visibleRows.length}</p>
-                   <div className="flex items-center gap-2">
-                     <label className="flex items-center gap-1.5 text-[11px] text-slate-600 dark:text-slate-300">
-                       Rows
-                       <select aria-label="Rows per page" value={pageSize} onChange={(event) => { setPageSize(Number(event.target.value)); setPage(1) }} className="rounded-md border border-slate-200 bg-white px-1.5 py-1 text-[11px] text-slate-700 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100 dark:[color-scheme:dark]">
-                         {[10, 25, 50, 100].map((size) => <option key={size} value={size}>{size}</option>)}
-                       </select>
-                     </label>
-                     <span className="min-w-14 text-center text-[11px] text-slate-500 dark:text-slate-400">Page {currentPage} of {pageCount}</span>
-                     <button type="button" onClick={() => setPage(currentPage - 1)} disabled={currentPage <= 1} aria-label="Previous page" className="rounded-md border border-slate-200 p-1 text-slate-600 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40 dark:border-slate-600 dark:text-slate-300 dark:hover:bg-slate-700"><ChevronLeft className="h-3.5 w-3.5" /></button>
-                     <button type="button" onClick={() => setPage(currentPage + 1)} disabled={currentPage >= pageCount} aria-label="Next page" className="rounded-md border border-slate-200 p-1 text-slate-600 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40 dark:border-slate-600 dark:text-slate-300 dark:hover:bg-slate-700"><ChevronRight className="h-3.5 w-3.5" /></button>
-                   </div>
-                 </div>
-              </>
+<div className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-200 px-3 py-2 dark:border-slate-700">
+                    <p className="text-[11px] text-slate-500 dark:text-slate-400">Showing {firstVisibleRow}–{lastVisibleRow} of {visibleRows.length}</p>
+                    <div className="flex items-center gap-2">
+                      <label className="flex items-center gap-1.5 text-[11px] text-slate-600 dark:text-slate-300">
+                        Page size
+                        <select aria-label="Rows per page" value={pageSize} onChange={(event) => { setPageSize(Number(event.target.value)); setPage(1) }} className="rounded-md border border-slate-200 bg-white px-2 py-1.5 text-[11px] text-slate-700 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100 dark:[color-scheme:dark]">
+                          {[5, 10, 15, 20, 25].map((size) => <option key={size} value={size}>{size}</option>)}
+                        </select>
+                      </label>
+                      <span className="min-w-14 text-center text-[11px] text-slate-500 dark:text-slate-400">Page {currentPage} of {pageCount}</span>
+                      <button type="button" onClick={() => setPage(currentPage - 1)} disabled={currentPage <= 1} aria-label="Previous page" className="rounded-md border border-slate-200 p-1 text-slate-600 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40 dark:border-slate-600 dark:text-slate-300 dark:hover:bg-slate-700"><ChevronLeft className="h-3.5 w-3.5" /></button>
+                      <button type="button" onClick={() => setPage(currentPage + 1)} disabled={currentPage >= pageCount} aria-label="Next page" className="rounded-md border border-slate-200 p-1 text-slate-600 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40 dark:border-slate-600 dark:text-slate-300 dark:hover:bg-slate-700"><ChevronRight className="h-3.5 w-3.5" /></button>
+                    </div>
+</div>
+               </>
             )}
           </section>
         </>
